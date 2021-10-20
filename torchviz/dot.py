@@ -1,4 +1,6 @@
+import re
 from collections import namedtuple
+from functools import partial
 from distutils.version import LooseVersion
 from graphviz import Digraph
 import torch
@@ -12,6 +14,7 @@ SAVED_PREFIX = "_saved_"
 
 def get_fn_name(fn, show_attrs, max_attr_chars):
     name = str(type(fn).__name__)
+    #print(name)
     if not show_attrs:
         return name
     attrs = dict()
@@ -35,10 +38,33 @@ def get_fn_name(fn, show_attrs, max_attr_chars):
     attrstr = '%-' + str(col1width) + 's: %' + str(col2width)+ 's'
     truncate = lambda s: s[:col2width - 3] + "..." if len(s) > col2width else s
     params = '\n'.join(attrstr % (k, truncate(str(v))) for (k, v) in attrs.items())
-    return name + '\n' + sep + '\n' + params
+    name_full = name + '\n' + sep + '\n' + params
+    return name_full
+
+def get_obj_name(fn):
+    """ return string name of the type of the given object"""
+    return str(type(fn).__name__).lower()
 
 
-def make_dot(var, params=None, show_attrs=False, show_saved=False, max_attr_chars=50):
+def match_regexp(regexp, string):
+    result = re.match(x, re.IGNORECASE)
+    pass
+
+def list_to_re(exception_list):
+    """convert list of exceptions onto case insensitive regexp"""
+    if exception_list:
+        phrase = '('+'|'.join(exception_list)+')'
+        regexp = re.compile(phrase)
+        fn = lambda x: regexp.match(x, re.IGNORECASE)
+        non_grata_ops = lambda x: False if fn(x) is None else True
+        
+    else:
+        non_grata_ops = lambda x: False
+    return non_grata_ops
+    
+    
+        
+def make_dot(var, params=None, show_attrs=False, show_saved=False, max_attr_chars=50, exlucded_ops=None):
     """ Produces Graphviz representation of PyTorch autograd graph.
 
     If a node represents a backward function, it is gray. Otherwise, the node
@@ -61,6 +87,7 @@ def make_dot(var, params=None, show_attrs=False, show_saved=False, max_attr_char
             present, are always displayed. (Requires PyTorch version >= 1.9)
         max_attr_chars: if show_attrs is `True`, sets max number of characters
             to display for any given attribute.
+        excluded_ops: None or list
     """
     if LooseVersion(torch.__version__) < LooseVersion("1.9") and \
         (show_attrs or show_saved):
@@ -83,8 +110,10 @@ def make_dot(var, params=None, show_attrs=False, show_saved=False, max_attr_char
                      height='0.2',
                      fontname='monospace')
     dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
+    
+    is_operation_excluded = list_to_re(exlucded_ops)
+      
     seen = set()
-
     def size_to_str(size):
         return '(' + (', ').join(['%d' % v for v in size]) + ')'
 
@@ -121,24 +150,38 @@ def make_dot(var, params=None, show_attrs=False, show_saved=False, max_attr_char
             var = fn.variable
             seen.add(var)
             dot.node(str(id(var)), get_var_name(var), fillcolor='lightblue')
+            ## TODO deal with that connection
             dot.edge(str(id(var)), str(id(fn)))
-
+ 
         # add the node for this grad_fn
-        dot.node(str(id(fn)), get_fn_name(fn, show_attrs, max_attr_chars))
-
+        if get_obj_name(fn).find('grad') == -1:
+            dot.node(str(id(fn)), get_fn_name(fn, show_attrs, max_attr_chars))
+        
         # recurse
         if hasattr(fn, 'next_functions'):
-            for u in fn.next_functions:
+            for i, u in enumerate(fn.next_functions):
                 if u[0] is not None:
-                    dot.edge(str(id(u[0])), str(id(fn)))
-                    add_nodes(u[0])
-
+                    print(i, get_obj_name(fn), '-', get_obj_name(u[0]))
+                    
+                    if is_operation_excluded(get_obj_name(u[0])):
+                        #found 
+                        if hasattr(u[0], 'next_functions'):
+                            u0_next = u[0].next_functions[0][0]
+                            dot.edge(str(id(u0_next)), str(id(fn)))
+                            add_nodes(u0_next)
+                            print('skipping')
+                    else:
+                    #if get_tensor_name(fn).lower().find('squeeze') == -1:
+                        dot.edge(str(id(u[0])), str(id(fn)))
+                        add_nodes(u[0])
+        
         # note: this used to show .saved_tensors in pytorch0.2, but stopped
         # working* as it was moved to ATen and Variable-Tensor merged
         # also note that this still works for custom autograd functions
         if hasattr(fn, 'saved_tensors'):
             for t in fn.saved_tensors:
                 seen.add(t)
+                #print(t, id(t))
                 dot.edge(str(id(t)), str(id(fn)), dir="none")
                 dot.node(str(id(t)), get_var_name(t), fillcolor='orange')
 
@@ -146,12 +189,15 @@ def make_dot(var, params=None, show_attrs=False, show_saved=False, max_attr_char
     def add_base_tensor(var, color='darkolivegreen1'):
         if var in seen:
             return
+        print(type(var))
         seen.add(var)
         dot.node(str(id(var)), get_var_name(var), fillcolor=color)
         if (var.grad_fn):
+            #print(get_obj_name(var.grad_fn))
             add_nodes(var.grad_fn)
             dot.edge(str(id(var.grad_fn)), str(id(var)))
         if var._is_view():
+            #print(get_tensor_name(var))
             add_base_tensor(var._base, color='darkolivegreen3')
             dot.edge(str(id(var._base)), str(id(var)), style="dotted")
 
